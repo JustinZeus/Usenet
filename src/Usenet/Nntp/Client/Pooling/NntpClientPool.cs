@@ -85,20 +85,42 @@ public sealed class NntpClientPool : INntpClientPool
         if (client is { Connected: true, Authenticated: true })
             return client;
 
-        if (!client.Connected)
-            await client.ConnectAsync(cancellationToken).ConfigureAwait(false);
-        if (!client.Authenticated)
-            await client
-                .AuthenticateAsync(_username, _password, cancellationToken)
-                .ConfigureAwait(false);
+        try
+        {
+            if (!client.Connected)
+                await client.ConnectAsync(cancellationToken).ConfigureAwait(false);
+            if (!client.Authenticated)
+                await client
+                    .AuthenticateAsync(_username, _password, cancellationToken)
+                    .ConfigureAwait(false);
 
-        if (!client.Connected || !client.Authenticated)
-            throw new InvalidOperationException(
-                $"Failed to connect to '{_connectionOptions.Host}:{_connectionOptions.Port}' "
-                    + $"SSL={_connectionOptions.UseSsl} C={client.Connected} A={client.Authenticated}.'"
-            );
+            if (!client.Connected || !client.Authenticated)
+                throw new InvalidOperationException(
+                    $"Failed to connect to '{_connectionOptions.Host}:{_connectionOptions.Port}' "
+                        + $"SSL={_connectionOptions.UseSsl} C={client.Connected} A={client.Authenticated}.'"
+                );
+        }
+        catch
+        {
+            // The caller never receives a lease for this client, so nothing would return it:
+            // drop it and release its slot, or every failed connect shrinks the pool for good.
+            DiscardClient(client);
+            throw;
+        }
 
         return client;
+    }
+
+    private void DiscardClient(INntpPoolEntry client)
+    {
+        lock (_lock)
+        {
+            _usedClients.Remove(client);
+            _currentPoolSize--;
+        }
+
+        client.Dispose();
+        _semaphore.Release();
     }
 
     internal void ReturnClient(INntpPoolEntry client)

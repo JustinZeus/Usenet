@@ -304,6 +304,75 @@ internal sealed class NntpClientPoolTests
         lease2.Dispose();
     }
 
+    [Test]
+    [Arguments(true)]
+    [Arguments(false)]
+    public async Task ReleaseClientAfterFailedConnection(
+        bool failConnect,
+        CancellationToken cancellationToken
+    )
+    {
+        using var failing = new FailingPoolEntry(failConnect);
+        var clients = new Queue<INntpPoolEntry>([failing, GetClientMock()]);
+
+        using var pool = new NntpClientPool(
+            new NntpPoolOptions
+            {
+                MaxPoolSize = 1,
+                Username = "example.user",
+                Password = "example.pass",
+                Connection = new NntpConnectionOptions
+                {
+                    Host = "example.server",
+                    Port = 563,
+                    UseSsl = true,
+                },
+            }
+        )
+        {
+            WaitTimeout = TimeSpan.Zero,
+            ClientFactory = clients.Dequeue,
+        };
+
+        // The connect (or authentication) fails, so no lease is handed out
+        await Assert.That(async () => await pool.GetLease(cancellationToken)).ThrowsException();
+        await Assert.That(failing.Disposed).IsTrue();
+
+        // The failed client must not keep its slot: the next lease gets a fresh client
+        var lease = await pool.GetLease(cancellationToken);
+        lease.Dispose();
+    }
+
+    private sealed class FailingPoolEntry(bool failConnect) : INntpPoolEntry
+    {
+        public bool Disposed { get; private set; }
+        public IPooledNntpClient Client => throw new InvalidOperationException("Not connected");
+        public bool Connected { get; private set; }
+        public bool Authenticated => false;
+        public bool HasError => false;
+        public bool HasPendingStream => false;
+        public DateTimeOffset LastActivity => DateTimeOffset.MinValue;
+
+        public void Touch() { }
+
+        public Task<bool> ConnectAsync(CancellationToken cancellationToken = default)
+        {
+            if (failConnect)
+                throw new TimeoutException("Timed out connecting");
+
+            Connected = true;
+            return Task.FromResult(true);
+        }
+
+        public Task<bool> AuthenticateAsync(
+            string username,
+            string password,
+            CancellationToken cancellationToken = default
+        ) => Task.FromResult(false);
+
+        public void Dispose() => Disposed = true;
+    }
+
     [SuppressMessage(
         "Performance",
         "CA1859",
